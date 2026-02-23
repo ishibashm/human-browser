@@ -245,6 +245,21 @@ test('snapshot -> click -> fill roundtrip works via daemon/bridge protocol', asy
       return;
     }
 
+    if (message.command === 'value') {
+      const selector = String(message.payload?.selector ?? '');
+      const nthRaw = message.payload?.nth;
+      const nth = typeof nthRaw === 'number' && Number.isInteger(nthRaw) ? nthRaw : 0;
+      const all = dom.window.document.querySelectorAll(selector);
+      const index = nth === -1 ? all.length - 1 : nth;
+      const input = all[index];
+      if (!(input instanceof dom.window.HTMLInputElement)) {
+        reply(false, { code: 'NOT_READABLE', message: 'value not readable' });
+        return;
+      }
+      reply(true, { ok: true, value: input.value });
+      return;
+    }
+
     if (message.command === 'reset' || message.command === 'reconnect') {
       reply(true, { ok: true });
       return;
@@ -296,6 +311,11 @@ test('snapshot -> click -> fill roundtrip works via daemon/bridge protocol', asy
       value: 'alice@example.com',
       snapshot_id: snapshotId,
     });
+    const refValue = await callDaemon(config, 'value', {
+      ref: 'e2',
+      snapshot_id: snapshotId,
+    });
+    assert.equal(String(refValue.result?.value), 'alice@example.com');
 
     await callDaemon(config, 'click', {
       ref: 'e4',
@@ -324,6 +344,10 @@ test('snapshot -> click -> fill roundtrip works via daemon/bridge protocol', asy
       selector: '#email',
       value: 'bob@example.com',
     });
+    const selectorValue = await callDaemon(config, 'value', {
+      selector: '#email',
+    });
+    assert.equal(String(selectorValue.result?.value), 'bob@example.com');
 
     await callDaemon(config, 'click', {
       selector: '.dup-login',

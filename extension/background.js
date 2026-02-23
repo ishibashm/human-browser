@@ -436,16 +436,53 @@ const CLICK_SCRIPT = `(input) => {
     };
   }
 
+  const canFocus = (node) => (
+    node instanceof HTMLInputElement
+    || node instanceof HTMLTextAreaElement
+    || node instanceof HTMLSelectElement
+    || node instanceof HTMLButtonElement
+    || node instanceof HTMLAnchorElement
+    || (node instanceof HTMLElement && node.isContentEditable)
+  );
+  const focusElement = (node) => {
+    if (!(node instanceof HTMLElement)) {
+      return false;
+    }
+    try {
+      node.focus({ preventScroll: true });
+    } catch {
+      node.focus();
+    }
+    return document.activeElement === node;
+  };
+  const requiresFocus = canFocus(el);
+
   el.scrollIntoView({ block: 'center', inline: 'center', behavior: 'instant' });
+  if (requiresFocus) {
+    focusElement(el);
+  }
   if (typeof el.click === 'function') {
     el.click();
   } else {
     const event = new MouseEvent('click', { bubbles: true, cancelable: true });
     el.dispatchEvent(event);
   }
+  const focused = requiresFocus ? focusElement(el) : false;
+  if (requiresFocus && !focused) {
+    return {
+      ok: false,
+      error: {
+        code: 'FOCUS_FAILED',
+        message: 'Element click did not move focus',
+        details: { selector: input.selector, nth },
+      },
+    };
+  }
 
   return {
     ok: true,
+    active_tag: document.activeElement?.tagName || null,
+    focused,
   };
 }`;
 
@@ -498,8 +535,34 @@ const FILL_SCRIPT = `(input) => {
     };
   }
 
-  el.focus();
-  el.value = input.value;
+  const setNativeValue = (node, nextValue) => {
+    if (node instanceof HTMLInputElement) {
+      const descriptor = Object.getOwnPropertyDescriptor(window.HTMLInputElement.prototype, 'value');
+      if (descriptor?.set) {
+        descriptor.set.call(node, nextValue);
+        return;
+      }
+      node.value = nextValue;
+      return;
+    }
+    if (node instanceof HTMLTextAreaElement) {
+      const descriptor = Object.getOwnPropertyDescriptor(window.HTMLTextAreaElement.prototype, 'value');
+      if (descriptor?.set) {
+        descriptor.set.call(node, nextValue);
+        return;
+      }
+      node.value = nextValue;
+      return;
+    }
+    node.value = nextValue;
+  };
+
+  try {
+    el.focus({ preventScroll: true });
+  } catch {
+    el.focus();
+  }
+  setNativeValue(el, input.value);
 
   el.dispatchEvent(new Event('input', { bubbles: true }));
   el.dispatchEvent(new Event('change', { bubbles: true }));
@@ -761,6 +824,75 @@ const TEXT_SCRIPT = `(input) => {
   return {
     ok: true,
     text: (el.textContent || '').trim(),
+  };
+}`;
+
+const VALUE_SCRIPT = `(input) => {
+  const all = document.querySelectorAll(input.selector);
+  if (all.length === 0) {
+    return {
+      ok: false,
+      error: {
+        code: 'NO_MATCH',
+        message: 'Element not found for selector',
+        details: { selector: input.selector },
+      },
+    };
+  }
+  const hasNth = input.nth !== undefined && input.nth !== null;
+  const rawNth = Number(input.nth);
+  if (hasNth && (!Number.isInteger(rawNth) || rawNth < -1)) {
+    return {
+      ok: false,
+      error: {
+        code: 'BAD_REQUEST',
+        message: 'nth must be an integer >= -1',
+        details: { nth: input.nth },
+      },
+    };
+  }
+  const nth = hasNth ? rawNth : 0;
+  const index = nth === -1 ? all.length - 1 : nth;
+  const el = all[index];
+  if (!el) {
+    return {
+      ok: false,
+      error: {
+        code: 'NO_MATCH',
+        message: 'Element not found for selector and nth',
+        details: { selector: input.selector, nth, count: all.length },
+      },
+    };
+  }
+
+  if (el instanceof HTMLInputElement || el instanceof HTMLTextAreaElement || el instanceof HTMLSelectElement) {
+    return {
+      ok: true,
+      value: el.value,
+    };
+  }
+
+  if (el instanceof HTMLOptionElement) {
+    return {
+      ok: true,
+      value: el.value,
+    };
+  }
+
+  if (el instanceof HTMLElement && el.isContentEditable) {
+    return {
+      ok: true,
+      value: el.textContent || '',
+    };
+  }
+
+  return {
+    ok: false,
+    error: {
+      code: 'NOT_READABLE',
+      message: 'Element does not expose value',
+      details: { selector: input.selector, nth },
+    },
   };
 }`;
 
@@ -1363,6 +1495,20 @@ async function runCommand(command, payload) {
       return response;
     }
 
+    case 'value': {
+      const tabId = await resolveTabId(payload.tab_id);
+      await ensureAttached(tabId);
+      const nth = getOptionalNth(payload.nth);
+      const response = await evaluateScript(tabId, VALUE_SCRIPT, {
+        selector: String(payload.selector),
+        nth,
+      });
+      if (!response?.ok) {
+        throw response?.error || new Error('value failed');
+      }
+      return response;
+    }
+
     case 'html': {
       const tabId = await resolveTabId(payload.tab_id);
       await ensureAttached(tabId);
@@ -1680,13 +1826,29 @@ async function resolveTabId(target) {
   }
 
   if (typeof target === 'number' && Number.isFinite(target)) {
-    return target;
+    const tab = await chrome.tabs.get(target).catch(() => null);
+    if (!tab || typeof tab.id !== 'number') {
+      throw {
+        code: 'NO_SUCH_TAB',
+        message: `No tab with given id ${target}.`,
+        details: { tab_id: target },
+      };
+    }
+    return tab.id;
   }
 
   if (typeof target === 'string') {
     const parsed = Number(target);
     if (Number.isFinite(parsed)) {
-      return parsed;
+      const tab = await chrome.tabs.get(parsed).catch(() => null);
+      if (!tab || typeof tab.id !== 'number') {
+        throw {
+          code: 'NO_SUCH_TAB',
+          message: `No tab with given id ${target}.`,
+          details: { tab_id: parsed },
+        };
+      }
+      return tab.id;
     }
   }
 

@@ -608,6 +608,33 @@ export function toDaemonRequest(
         },
       };
     }
+    case 'value': {
+      const selectorOrRef = args[0];
+      if (!selectorOrRef) {
+        throw new HBError('BAD_REQUEST', 'value requires <selector|@ref>');
+      }
+      const parsed = parseNamedFlags(args.slice(1), ['--snapshot']);
+      const ref = parseRefArg(selectorOrRef);
+      if (ref) {
+        const snapshotId = parsed['--snapshot'];
+        if (!snapshotId) {
+          throw new HBError('BAD_REQUEST', 'value with ref requires --snapshot <snapshot_id>');
+        }
+        return {
+          command: 'value',
+          args: {
+            ref,
+            snapshot_id: snapshotId,
+          },
+        };
+      }
+      return {
+        command: 'value',
+        args: {
+          selector: selectorOrRef,
+        },
+      };
+    }
     case 'html': {
       const selectorOrRef = args[0];
       if (!selectorOrRef) {
@@ -643,10 +670,13 @@ export function toDaemonRequest(
       if (type === 'text') {
         return toDaemonRequest('text', args.slice(1));
       }
+      if (type === 'value') {
+        return toDaemonRequest('value', args.slice(1));
+      }
       if (type === 'html') {
         return toDaemonRequest('html', args.slice(1));
       }
-      throw new HBError('BAD_REQUEST', 'get supports only text|html');
+      throw new HBError('BAD_REQUEST', 'get supports only text|value|html');
     }
     case 'wait':
     case 'wait-for': {
@@ -1453,6 +1483,7 @@ function printHelp(): void {
       '  pdf <path> [--tab <active|tab_id>]',
       '  eval <javascript> [--tab <active|tab_id>]',
       '  get text <selector|@ref> [--snapshot <snapshot_id>]',
+      '  get value <selector|@ref> [--snapshot <snapshot_id>]',
       '  get html [selector|@ref] [--snapshot <snapshot_id>]',
       '  wait <selector|milliseconds> [--timeout <ms>] [--tab <active|tab_id>]',
       '  wait --text <text> [--timeout <ms>] [--tab <active|tab_id>]',

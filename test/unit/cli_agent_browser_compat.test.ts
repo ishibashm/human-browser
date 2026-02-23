@@ -43,6 +43,23 @@ test('get text with ref requires snapshot id', () => {
   );
 });
 
+test('get value with ref requires snapshot id', () => {
+  assert.throws(
+    () => {
+      toDaemonRequest('get', ['value', '@e1']);
+    },
+    (error: unknown) => error instanceof HBError && error.structured.code === 'BAD_REQUEST',
+  );
+});
+
+test('get value maps to value command', () => {
+  const request = toDaemonRequest('get', ['value', '#email']);
+  assert.equal(request.command, 'value');
+  assert.deepEqual(request.args, {
+    selector: '#email',
+  });
+});
+
 test('cookies set maps to cookies_set', () => {
   const request = toDaemonRequest('cookies', ['set', 'session', 'abc', '--url', 'https://example.com']);
   assert.equal(request.command, 'cookies_set');

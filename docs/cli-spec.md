@@ -51,6 +51,7 @@
 - `human-browser pdf <path> [--tab <active|tab_id>]`
 - `human-browser eval <javascript> [--tab <active|tab_id>]`
 - `human-browser get text <selector|@ref> [--snapshot <snapshot_id>]`
+- `human-browser get value <selector|@ref> [--snapshot <snapshot_id>]`
 - `human-browser get html [selector|@ref] [--snapshot <snapshot_id>]`
 - `human-browser wait <selector|milliseconds> [--timeout <ms>] [--tab <active|tab_id>]`
 - `human-browser wait --text <text> [--timeout <ms>] [--tab <active|tab_id>]`

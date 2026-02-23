@@ -89,6 +89,7 @@ Failure:
 - `hover`: `{ tab_id: number | "active", selector: string, nth?: number }`
 - `eval`: `{ tab_id: number | "active", script: string }`
 - `text`: `{ tab_id: number | "active", selector: string, nth?: number }`
+- `value`: `{ tab_id: number | "active", selector: string, nth?: number }`
 - `html`: `{ tab_id: number | "active", selector?: string, nth?: number }`
 - `wait`: `{ tab_id: number | "active", selector?: string, sleep_ms?: number, timeout_ms?: number, text?: string, url_pattern?: string, load_state?: string, expression?: string }`
 - `screenshot`: `{ tab_id: number | "active", full_page?: boolean, selector?: string }`

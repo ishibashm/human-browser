@@ -417,6 +417,25 @@ async function executeCommand(
       if (target === undefined) {
         throw new HBError('BAD_REQUEST', 'use command requires args.target');
       }
+      if (target !== 'active') {
+        const requestedTabId = parseRequestedTabId(target);
+        if (requestedTabId !== null) {
+          const tabsResult = await sendBridgeCommand(state, 'list_tabs', {}, options);
+          const tabs = Array.isArray(tabsResult.tabs) ? tabsResult.tabs : [];
+          const exists = tabs.some((tab) => {
+            if (!tab || typeof tab !== 'object') {
+              return false;
+            }
+            const id = Number((tab as { id?: unknown }).id);
+            return Number.isFinite(id) && id === requestedTabId;
+          });
+          if (!exists) {
+            throw new HBError('BAD_REQUEST', `No tab with given id ${requestedTabId}.`, {
+              tab_id: requestedTabId,
+            });
+          }
+        }
+      }
       const result = await sendBridgeCommand(state, 'select_tab', { target }, options);
       const tabId = Number(result.tab_id);
       if (Number.isFinite(tabId)) {
@@ -853,6 +872,26 @@ async function executeCommand(
       const result = await sendBridgeCommand(
         state,
         'text',
+        {
+          tab_id: target.tabId,
+          selector: target.selector,
+          nth: target.nth,
+        },
+        options,
+      );
+      return {
+        tab_id: target.tabId,
+        selector: target.selector,
+        nth: target.nth,
+        result,
+      };
+    }
+
+    case 'value': {
+      const target = resolveReadTarget(state, args, 'value');
+      const result = await sendBridgeCommand(
+        state,
+        'value',
         {
           tab_id: target.tabId,
           selector: target.selector,
@@ -1355,7 +1394,7 @@ function resolveActionTarget(
   throw new HBError('BAD_REQUEST', `${command} requires args.ref or args.selector`);
 }
 
-function getRequiredSnapshotId(args: Record<string, unknown>, command: 'click' | 'fill' | 'hover' | 'text' | 'html'): string {
+function getRequiredSnapshotId(args: Record<string, unknown>, command: 'click' | 'fill' | 'hover' | 'text' | 'value' | 'html'): string {
   const snapshotId = args.snapshot_id;
   if (typeof snapshotId !== 'string' || snapshotId.length === 0) {
     throw new HBError('BAD_REQUEST', `${command} with ref requires args.snapshot_id`, undefined, {
@@ -1384,7 +1423,7 @@ function parseRefArg(raw: string): string | null {
 function resolveReadTarget(
   state: RuntimeState,
   args: Record<string, unknown>,
-  command: 'text' | 'html',
+  command: 'text' | 'value' | 'html',
   allowEmptySelector = false,
 ): { tabId: number | 'active'; selector?: string; nth?: number } {
   const refRaw = typeof args.ref === 'string' ? args.ref : undefined;
@@ -1498,56 +1537,62 @@ async function sendBridgeCommand(
 
   const requestId = randomUUID();
 
-  const result = await new Promise<Record<string, unknown>>((resolve, reject) => {
-    const timer = setTimeout(() => {
-      state.pendingCommands.delete(requestId);
-      reject(
-        new HBError(
-          'TIMEOUT',
-          `Extension timeout while executing command: ${command}`,
-          {
-            phase: 'extension_response',
-            command,
-            timeout_ms: options.timeoutMs,
-          },
-          {
-            next_command: 'human-browser diagnose',
-          },
-        ).structured,
-      );
-    }, options.timeoutMs);
-
-    const pending: PendingCommand = {
-      requestId,
-      command,
-      resolve,
-      reject: (structuredError) => reject(structuredError),
-      timer,
-    };
-
-    state.pendingCommands.set(requestId, pending);
-
-    state.extensionSocket?.send(
-      JSON.stringify({
-        type: 'COMMAND',
-        request_id: requestId,
-        command,
-        payload,
-      }),
-      (error) => {
-        if (error) {
-          clearTimeout(timer);
-          state.pendingCommands.delete(requestId);
-          reject(
-            new HBError('DISCONNECTED', 'Failed to send command to extension', {
+  let result: Record<string, unknown>;
+  try {
+    result = await new Promise<Record<string, unknown>>((resolve, reject) => {
+      const timer = setTimeout(() => {
+        state.pendingCommands.delete(requestId);
+        reject(
+          new HBError(
+            'TIMEOUT',
+            `Extension timeout while executing command: ${command}`,
+            {
+              phase: 'extension_response',
               command,
-              error: error.message,
-            }).structured,
-          );
-        }
-      },
-    );
-  });
+              timeout_ms: options.timeoutMs,
+            },
+            {
+              next_command: 'human-browser diagnose',
+            },
+          ).structured,
+        );
+      }, options.timeoutMs);
+
+      const pending: PendingCommand = {
+        requestId,
+        command,
+        resolve,
+        reject: (structuredError) => reject(structuredError),
+        timer,
+      };
+
+      state.pendingCommands.set(requestId, pending);
+
+      state.extensionSocket?.send(
+        JSON.stringify({
+          type: 'COMMAND',
+          request_id: requestId,
+          command,
+          payload,
+        }),
+        (error) => {
+          if (error) {
+            clearTimeout(timer);
+            state.pendingCommands.delete(requestId);
+            reject(
+              new HBError('DISCONNECTED', 'Failed to send command to extension', {
+                command,
+                error: error.message,
+              }).structured,
+            );
+          }
+        },
+      );
+    });
+  } catch (error) {
+    maybeClearSelectedTabForMissingTabError(state, payload, error);
+    throw error;
+  }
 
   logEvent(state, 'info', 'bridge.command_ok', `Bridge command succeeded: ${command}`, {
     command,
@@ -1555,6 +1600,47 @@ async function sendBridgeCommand(
   });
 
   return result;
+}
+
+function parseRequestedTabId(target: unknown): number | null {
+  if (typeof target === 'number' && Number.isFinite(target)) {
+    return target;
+  }
+  if (typeof target === 'string') {
+    const parsed = Number(target);
+    if (Number.isFinite(parsed)) {
+      return parsed;
+    }
+  }
+  return null;
+}
+
+function maybeClearSelectedTabForMissingTabError(
+  state: RuntimeState,
+  payload: Record<string, unknown>,
+  error: unknown,
+): void {
+  const targetTabId = payload.tab_id;
+  if (typeof targetTabId !== 'number' || !Number.isFinite(targetTabId)) {
+    return;
+  }
+  if (state.selectedTabId !== targetTabId) {
+    return;
+  }
+  if (!error || typeof error !== 'object') {
+    return;
+  }
+  const structured = error as { code?: unknown; message?: unknown; details?: Record<string, unknown> };
+  if (structured.code !== 'EXTENSION_ERROR') {
+    return;
+  }
+  const extensionCode = structured.details?.extension_code;
+  const isMissingTabCode = extensionCode === 'NO_SUCH_TAB' || extensionCode === 'DEBUGGER_ATTACH_FAILED';
+  const message = typeof structured.message === 'string' ? structured.message : '';
+  if (!isMissingTabCode || !message.includes('No tab with given id')) {
+    return;
+  }
+  state.selectedTabId = undefined;
 }
 
 async function ensureBridgeConnected(state: RuntimeState, timeoutMs: number, queueMode: QueueMode): Promise<void> {
