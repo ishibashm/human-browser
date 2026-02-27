@@ -78,3 +78,10 @@ human-browser rotate-token --show-token
 
 - CLI仕様: `docs/cli-spec.md`
 - protocol仕様: `docs/protocol.md`
+
+## Dogfood skill
+
+`human-browser` を使った探索的 QA 用の skill を追加しています。
+
+- Skill: `skills/dogfood/SKILL.md`
+- Report template: `skills/dogfood/templates/dogfood-report-template.md`
