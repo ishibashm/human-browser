@@ -38,8 +38,9 @@ Create output paths and initialize report:
 OUTPUT_DIR="${OUTPUT_DIR:-./dogfood-output}"
 SESSION_LABEL="${SESSION_LABEL:-$(date +%Y%m%d-%H%M%S)}"
 RUN_DIR="$OUTPUT_DIR/$SESSION_LABEL"
+SKILL_DIR="${CODEX_HOME:?CODEX_HOME is required}/skills/dogfood"
 mkdir -p "$RUN_DIR/screenshots" "$RUN_DIR/logs"
-cp skills/dogfood/templates/dogfood-report-template.md "$RUN_DIR/report.md"
+cp "$SKILL_DIR/templates/dogfood-report-template.md" "$RUN_DIR/report.md"
 ```
 
 Open target and stabilize:
@@ -145,4 +146,3 @@ Then return:
 - run directory path
 - issue count summary
 - highest severity findings
-
