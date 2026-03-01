@@ -15,8 +15,11 @@
 - `src/shared/*`: 共通型・設定・エラー・snapshot整形
 - `extension/*`: Chrome Extension (Manifest V3)
 - `vendor/agent-browser/*`: snapshot/ref の vendor ロジック
+- `../agent-browser`: `agent-browser` の実体リポジトリ（仕様・コマンドの正本）
 - `docs/*`: CLI仕様と protocol
 - `test/*`: unit / integration
+
+`agent-browser` の仕様やコマンド可否を確認する場合は、`vendor/agent-browser/*` ではなく `../agent-browser` を必ず参照すること（vendor は一部ロジックのみ）。
 
 ## 3. 開発・実行コマンド
 
