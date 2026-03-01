@@ -65,6 +65,12 @@
 - `human-browser network start|stop [--tab <active|tab_id>]`
 - `human-browser network dump|requests [--filter <text>] [--clear] [--tab <active|tab_id>]`
 - `human-browser console [start|stop|dump] [--clear] [--tab <active|tab_id>]`
+- `human-browser record start <path.webm> [--tab <active|tab_id>] [--fps <1-30>]`
+  - 定期的に screenshot を取得して録画を開始（`ffmpeg` 必須）
+- `human-browser record stop`
+  - 録画を停止し、`.webm` を保存
+- `human-browser record restart <path.webm> [--tab <active|tab_id>] [--fps <1-30>]`
+  - 現在の録画を停止して新しい録画を開始
 - `human-browser reconnect`
   - request bridge reconnect
 - `human-browser reset`

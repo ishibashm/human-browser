@@ -695,6 +695,9 @@ export function toDaemonRequest(
     case 'console': {
       return parseConsoleCommand(args);
     }
+    case 'record': {
+      return parseRecordCommand(args);
+    }
     case 'diagnose': {
       const parsed = parseNamedFlags(args, ['--limit']);
       const limit = parsed['--limit'];
@@ -1108,6 +1111,53 @@ function parseConsoleCommand(args: string[]): { command: string; args: Record<st
   };
 }
 
+function parseRecordCommand(args: string[]): { command: string; args: Record<string, unknown> } {
+  const sub = args[0];
+  if (!sub) {
+    throw new HBError('BAD_REQUEST', 'record supports start|stop|restart');
+  }
+
+  if (sub === 'stop') {
+    if (args.length > 1) {
+      throw new HBError('BAD_REQUEST', 'record stop does not accept additional arguments');
+    }
+    return {
+      command: 'record_stop',
+      args: {},
+    };
+  }
+
+  if (sub === 'start' || sub === 'restart') {
+    const path = args[1];
+    if (!path) {
+      throw new HBError('BAD_REQUEST', `record ${sub} requires <output.webm>`);
+    }
+    const parsed = parseNamedFlags(args.slice(2), ['--tab', '--fps']);
+    const tabRaw = parsed['--tab'];
+    const fpsRaw = parsed['--fps'];
+    let fps: number | undefined;
+
+    if (fpsRaw !== undefined) {
+      const parsedFps = Number(fpsRaw);
+      if (!Number.isInteger(parsedFps) || parsedFps <= 0 || parsedFps > 30) {
+        throw new HBError('BAD_REQUEST', '--fps must be an integer between 1 and 30');
+      }
+      fps = parsedFps;
+    }
+
+    return {
+      command: sub === 'start' ? 'record_start' : 'record_restart',
+      args: {
+        path,
+        tab_id: tabRaw === undefined ? undefined : parseTab(tabRaw),
+        fps,
+      },
+    };
+  }
+
+  throw new HBError('BAD_REQUEST', 'record supports start|stop|restart');
+}
+
 function parseSnapshotArgs(args: string[]): { target?: number | 'active'; options: SnapshotOptions } {
   const options: SnapshotOptions = {};
   let target: number | 'active' | undefined;
@@ -1497,6 +1547,9 @@ function printHelp(): void {
       '  network start|stop [--tab <active|tab_id>]',
       '  network dump|requests [--filter <text>] [--clear] [--tab <active|tab_id>]',
       '  console [start|stop|dump] [--clear] [--tab <active|tab_id>]',
+      '  record start <path.webm> [--tab <active|tab_id>] [--fps <1-30>]',
+      '  record stop',
+      '  record restart <path.webm> [--tab <active|tab_id>] [--fps <1-30>]',
       '  reconnect',
       '  reset',
       '  diagnose [--limit <N>]',

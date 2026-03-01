@@ -89,6 +89,41 @@ test('console default maps to console_dump', () => {
   });
 });
 
+test('record start maps to record_start', () => {
+  const request = toDaemonRequest('record', ['start', 'demo.webm', '--tab', 'active', '--fps', '8']);
+  assert.equal(request.command, 'record_start');
+  assert.deepEqual(request.args, {
+    path: 'demo.webm',
+    tab_id: 'active',
+    fps: 8,
+  });
+});
+
+test('record stop maps to record_stop', () => {
+  const request = toDaemonRequest('record', ['stop']);
+  assert.equal(request.command, 'record_stop');
+  assert.deepEqual(request.args, {});
+});
+
+test('record restart maps to record_restart', () => {
+  const request = toDaemonRequest('record', ['restart', 'take2.webm']);
+  assert.equal(request.command, 'record_restart');
+  assert.deepEqual(request.args, {
+    path: 'take2.webm',
+    tab_id: undefined,
+    fps: undefined,
+  });
+});
+
+test('record fps validation rejects out-of-range value', () => {
+  assert.throws(
+    () => {
+      toDaemonRequest('record', ['start', 'demo.webm', '--fps', '31']);
+    },
+    (error: unknown) => error instanceof HBError && error.structured.code === 'BAD_REQUEST',
+  );
+});
+
 test('wait-for alias maps to wait', () => {
   const request = toDaemonRequest('wait-for', ['#ready', '--timeout', '1500']);
   assert.equal(request.command, 'wait');

@@ -1,8 +1,10 @@
 import { randomUUID } from 'node:crypto';
 import { createServer, type IncomingMessage, type Server, type ServerResponse } from 'node:http';
-import { mkdir, readFile, writeFile } from 'node:fs/promises';
+import { access, mkdir, readFile, writeFile } from 'node:fs/promises';
+import { constants as fsConstants } from 'node:fs';
 import { dirname, extname, join, resolve } from 'node:path';
 import { homedir } from 'node:os';
+import { spawn } from 'node:child_process';
 import { WebSocketServer, type WebSocket } from 'ws';
 import { URL } from 'node:url';
 import { HBError, asStructuredError } from '../shared/errors.ts';
@@ -52,6 +54,24 @@ interface RuntimeState {
   events: DaemonEvent[];
   disconnectHistory: Array<{ at: string; reason: string }>;
   reconnectHistory: Array<{ at: string; reason: string }>;
+  recording?: RecordingSession;
+}
+
+interface RecordingSession {
+  tabId: number;
+  outputPath: string;
+  frameDir: string;
+  fps: number;
+  frameCount: number;
+  startedAt: string;
+  lastFrameAt?: string;
+  lastCaptureError?: StructuredError;
+  captureInFlight?: Promise<void>;
+  timer?: NodeJS.Timeout;
+  active: boolean;
+  stopping: boolean;
+  queueMode: QueueMode;
+  timeoutMs: number;
 }
 
 export interface StartedDaemon {
@@ -74,6 +94,7 @@ export async function startDaemon(config: DaemonConfig): Promise<StartedDaemon> 
     events: [],
     disconnectHistory: [],
     reconnectHistory: [],
+    recording: undefined,
   };
 
   const httpServer = createServer((req, res) => {
@@ -121,6 +142,9 @@ export async function startDaemon(config: DaemonConfig): Promise<StartedDaemon> 
   return {
     close: async () => {
       clearInterval(heartbeat);
+      if (state.recording?.timer) {
+        clearInterval(state.recording.timer);
+      }
       rejectAllPending(state, {
         code: 'DISCONNECTED',
         message: 'Daemon shutting down',
@@ -404,6 +428,18 @@ async function executeCommand(
         session: {
           selected_tab_id: state.selectedTabId,
           latest_snapshot_id: state.latestSnapshot?.snapshot_id,
+          recording: state.recording
+            ? {
+                active: state.recording.active,
+                tab_id: state.recording.tabId,
+                output_path: state.recording.outputPath,
+                fps: state.recording.fps,
+                frame_count: state.recording.frameCount,
+                started_at: state.recording.startedAt,
+                last_frame_at: state.recording.lastFrameAt,
+                last_capture_error: state.recording.lastCaptureError,
+              }
+            : { active: false },
         },
       };
     }
@@ -1147,6 +1183,36 @@ async function executeCommand(
       };
     }
 
+    case 'record_start': {
+      return startRecordingSession(state, args, options);
+    }
+
+    case 'record_stop': {
+      if (!state.recording) {
+        throw new HBError('BAD_REQUEST', 'No recording in progress. Run `human-browser record start <path.webm>` first.');
+      }
+      const recording = state.recording;
+      state.recording = undefined;
+      return stopRecordingSession(state, recording);
+    }
+
+    case 'record_restart': {
+      let stopped: Record<string, unknown> | undefined;
+      if (state.recording) {
+        const previous = state.recording;
+        state.recording = undefined;
+        stopped = await stopRecordingSession(state, previous);
+      }
+      const started = await startRecordingSession(state, args, options);
+      if (stopped) {
+        return {
+          stopped,
+          started,
+        };
+      }
+      return started;
+    }
+
     case 'reconnect': {
       if (!state.extensionSocket || state.extensionSocket.readyState !== state.extensionSocket.OPEN) {
         throw new HBError(
@@ -1518,6 +1584,328 @@ function buildAutoScreenshotPath(format: 'png' | 'jpeg'): string {
 async function writeBase64File(path: string, base64: string): Promise<void> {
   await mkdir(dirname(path), { recursive: true });
   await writeFile(path, Buffer.from(base64, 'base64'));
+}
+
+async function startRecordingSession(
+  state: RuntimeState,
+  args: Record<string, unknown>,
+  options: { timeoutMs: number; queueMode: QueueMode },
+): Promise<Record<string, unknown>> {
+  if (state.recording) {
+    throw new HBError('BAD_REQUEST', 'Recording already in progress. Run `human-browser record stop` first.');
+  }
+
+  const outputPath = resolveRecordingOutputPath(getStringField(args, 'path'));
+  const outputExists = await pathExists(outputPath);
+  if (outputExists) {
+    throw new HBError('BAD_REQUEST', `Output file already exists: ${outputPath}`);
+  }
+
+  const fps = getRecordingFps(args.fps);
+  const target = resolveTabForAction(state, args);
+  const selected = await sendBridgeCommand(
+    state,
+    'select_tab',
+    { target },
+    options,
+  );
+  const tabId = Number(selected.tab_id);
+  if (!Number.isFinite(tabId)) {
+    throw new HBError('EXTENSION_ERROR', 'select_tab result is missing tab_id', { result: selected });
+  }
+
+  const frameDir = buildAutoRecordingFrameDir();
+  await mkdir(frameDir, { recursive: true });
+
+  const recording: RecordingSession = {
+    tabId,
+    outputPath,
+    frameDir,
+    fps,
+    frameCount: 0,
+    startedAt: new Date().toISOString(),
+    active: true,
+    stopping: false,
+    queueMode: options.queueMode,
+    timeoutMs: options.timeoutMs,
+  };
+  state.recording = recording;
+  state.selectedTabId = tabId;
+
+  try {
+    await captureRecordingFrame(state, recording);
+  } catch (error) {
+    state.recording = undefined;
+    throw error;
+  }
+
+  const intervalMs = Math.max(1, Math.floor(1000 / fps));
+  recording.timer = setInterval(() => {
+    void captureRecordingFrame(state, recording).catch(() => {
+      // captureRecordingFrame persists structured error in recording.lastCaptureError.
+    });
+  }, intervalMs);
+
+  return {
+    tab_id: tabId,
+    output_path: outputPath,
+    fps,
+    frame_dir: frameDir,
+    frame_count: recording.frameCount,
+    started_at: recording.startedAt,
+    active: recording.active,
+  };
+}
+
+async function stopRecordingSession(
+  state: RuntimeState,
+  recording: RecordingSession,
+): Promise<Record<string, unknown>> {
+  recording.stopping = true;
+  recording.active = false;
+
+  if (recording.timer) {
+    clearInterval(recording.timer);
+    recording.timer = undefined;
+  }
+
+  if (recording.captureInFlight) {
+    try {
+      await recording.captureInFlight;
+    } catch {
+      // Error details are persisted in recording.lastCaptureError by captureRecordingFrame.
+    }
+  }
+
+  if (recording.frameCount === 0) {
+    if (recording.lastCaptureError) {
+      throw new HBError(
+        recording.lastCaptureError.code,
+        recording.lastCaptureError.message,
+        recording.lastCaptureError.details,
+        recording.lastCaptureError.recovery,
+      );
+    }
+    throw new HBError('BAD_REQUEST', 'No frames were captured during recording.');
+  }
+
+  await encodeRecordingWithFfmpeg(recording);
+  const stoppedAt = new Date().toISOString();
+
+  const response: Record<string, unknown> = {
+    tab_id: recording.tabId,
+    output_path: recording.outputPath,
+    fps: recording.fps,
+    frames: recording.frameCount,
+    frame_dir: recording.frameDir,
+    started_at: recording.startedAt,
+    stopped_at: stoppedAt,
+  };
+
+  if (recording.lastCaptureError) {
+    response.capture_error = recording.lastCaptureError;
+  }
+
+  if (state.recording === recording) {
+    state.recording = undefined;
+  }
+
+  return response;
+}
+
+async function captureRecordingFrame(state: RuntimeState, recording: RecordingSession): Promise<void> {
+  if (recording.stopping) {
+    return;
+  }
+
+  if (recording.captureInFlight) {
+    return recording.captureInFlight;
+  }
+
+  const capturePromise = (async () => {
+    try {
+      const result = await sendBridgeCommand(
+        state,
+        'screenshot',
+        {
+          tab_id: recording.tabId,
+          full_page: false,
+        },
+        {
+          timeoutMs: recording.timeoutMs,
+          queueMode: recording.queueMode,
+        },
+      );
+      const rawData = result.data_base64;
+      if (typeof rawData !== 'string' || rawData.length === 0) {
+        throw new HBError('EXTENSION_ERROR', 'screenshot result is missing data_base64', { result });
+      }
+
+      recording.frameCount += 1;
+      const framePath = join(recording.frameDir, `frame-${String(recording.frameCount).padStart(6, '0')}.png`);
+      await writeBase64File(framePath, rawData);
+      recording.lastFrameAt = new Date().toISOString();
+    } catch (error) {
+      const structured = asStructuredError(error);
+      recording.lastCaptureError = structured;
+      recording.active = false;
+      if (recording.timer) {
+        clearInterval(recording.timer);
+        recording.timer = undefined;
+      }
+      throw new HBError(structured.code, structured.message, structured.details, structured.recovery);
+    }
+  })();
+
+  recording.captureInFlight = capturePromise;
+  try {
+    await capturePromise;
+  } finally {
+    if (recording.captureInFlight === capturePromise) {
+      recording.captureInFlight = undefined;
+    }
+  }
+}
+
+function resolveRecordingOutputPath(inputPath: string): string {
+  const absolute = resolve(inputPath);
+  const extension = extname(absolute).toLowerCase();
+  if (!extension) {
+    return `${absolute}.webm`;
+  }
+  if (extension !== '.webm') {
+    throw new HBError('BAD_REQUEST', 'record output path must use .webm extension');
+  }
+  return absolute;
+}
+
+function getRecordingFps(raw: unknown): number {
+  if (raw === undefined) {
+    return 5;
+  }
+  if (typeof raw !== 'number' || !Number.isInteger(raw) || raw <= 0 || raw > 30) {
+    throw new HBError('BAD_REQUEST', 'record fps must be an integer between 1 and 30');
+  }
+  return raw;
+}
+
+function buildAutoRecordingFrameDir(): string {
+  const timestamp = new Date().toISOString().replace(/[:.]/g, '-');
+  const random = Math.random().toString(36).slice(2, 8);
+  return join(homedir(), '.human-browser', 'tmp', 'recordings', `recording-${timestamp}-${random}`);
+}
+
+async function pathExists(path: string): Promise<boolean> {
+  try {
+    await access(path);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+async function encodeRecordingWithFfmpeg(recording: RecordingSession): Promise<void> {
+  await mkdir(dirname(recording.outputPath), { recursive: true });
+  const ffmpegCommand = await resolveFfmpegCommand();
+  const inputPattern = join(recording.frameDir, 'frame-%06d.png');
+  const args = [
+    '-y',
+    '-loglevel',
+    'error',
+    '-framerate',
+    String(recording.fps),
+    '-i',
+    inputPattern,
+    '-an',
+    '-c:v',
+    'libvpx-vp9',
+    '-pix_fmt',
+    'yuv420p',
+    recording.outputPath,
+  ];
+
+  await new Promise<void>((resolvePromise, rejectPromise) => {
+    const child = spawn(ffmpegCommand, args, {
+      stdio: ['ignore', 'pipe', 'pipe'],
+    });
+
+    let stderr = '';
+    child.stderr.on('data', (chunk: Buffer | string) => {
+      stderr += String(chunk);
+    });
+
+    child.on('error', (error) => {
+      const code = (error as NodeJS.ErrnoException).code;
+      if (code === 'ENOENT') {
+        rejectPromise(
+          new HBError(
+            'BAD_REQUEST',
+            'ffmpeg command not found. Install ffmpeg or set HUMAN_BROWSER_FFMPEG_PATH.',
+          ),
+        );
+        return;
+      }
+      rejectPromise(
+        new HBError('INTERNAL', 'Failed to start ffmpeg process', {
+          error: error.message,
+        }),
+      );
+    });
+
+    child.on('close', (code) => {
+      if (code === 0) {
+        resolvePromise();
+        return;
+      }
+      rejectPromise(
+        new HBError('INTERNAL', 'ffmpeg failed to encode recording', {
+          ffmpeg_command: ffmpegCommand,
+          exit_code: code,
+          stderr: stderr.trim().slice(-4000),
+        }),
+      );
+    });
+  });
+}
+
+async function resolveFfmpegCommand(): Promise<string> {
+  const envCommand = typeof process.env.HUMAN_BROWSER_FFMPEG_PATH === 'string'
+    ? process.env.HUMAN_BROWSER_FFMPEG_PATH.trim()
+    : '';
+  if (envCommand) {
+    if (!envCommand.includes('/')) {
+      return envCommand;
+    }
+    if (await isExecutableFile(envCommand)) {
+      return envCommand;
+    }
+    throw new HBError(
+      'BAD_REQUEST',
+      `HUMAN_BROWSER_FFMPEG_PATH is not executable: ${envCommand}`,
+    );
+  }
+
+  const absoluteCandidates = [
+    '/opt/homebrew/bin/ffmpeg',
+    '/usr/local/bin/ffmpeg',
+    '/usr/bin/ffmpeg',
+  ];
+  for (const candidate of absoluteCandidates) {
+    if (await isExecutableFile(candidate)) {
+      return candidate;
+    }
+  }
+
+  return 'ffmpeg';
+}
+
+async function isExecutableFile(path: string): Promise<boolean> {
+  try {
+    await access(path, fsConstants.X_OK);
+    return true;
+  } catch {
+    return false;
+  }
 }
 
 async function sendBridgeCommand(

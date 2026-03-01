@@ -63,6 +63,9 @@ human-browser cookies set session abc123
 human-browser network start
 human-browser network dump --clear
 human-browser console dump --clear
+human-browser record start demo.webm
+# ...操作...
+human-browser record stop
 # refs (@e1/ref=e1/e1) で操作する場合は --snapshot が必須
 human-browser click @e1 --snapshot <snapshot_id>
 human-browser fill @e2 hello@example.com --snapshot <snapshot_id>
@@ -73,6 +76,8 @@ human-browser rotate-token --show-token
 ```
 
 `snapshot` はデフォルトで本文コンテキストも含む全体スナップショットを返します。`--interactive` を付けると操作候補のみに絞ります。
+
+`record` は内部で定期的に `screenshot` を取得し、`ffmpeg` で `.webm` を生成します。`ffmpeg` がインストールされていない環境では利用できません。
 
 ## 仕様
 
