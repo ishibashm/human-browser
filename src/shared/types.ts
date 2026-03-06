@@ -59,6 +59,15 @@ export interface SnapshotOptions {
   selector?: string;
 }
 
+export interface DialogState {
+  open: boolean;
+  type?: string;
+  message?: string;
+  default_prompt?: string;
+  url?: string;
+  opened_at?: string;
+}
+
 export interface DaemonEvent {
   id: string;
   at: string;
@@ -79,6 +88,7 @@ export interface DiagnosticsReport {
   session: {
     selected_tab_id?: number;
     latest_snapshot_id?: string;
+    dialog?: DialogState;
   };
   events: DaemonEvent[];
   disconnect_history: Array<{ at: string; reason: string }>;

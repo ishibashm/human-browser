@@ -49,6 +49,8 @@ human-browser click '#login'
 human-browser fill '#email' hello@example.com
 human-browser click '.scene-card button' --nth 1
 human-browser fill 'textarea[placeholder="Prompt"]' "scene 2" --nth 1
+human-browser dialog accept
+human-browser dialog dismiss
 human-browser open https://example.com
 human-browser hover '#menu'
 human-browser screenshot
@@ -76,6 +78,8 @@ human-browser rotate-token --show-token
 ```
 
 `snapshot` はデフォルトで本文コンテキストも含む全体スナップショットを返します。`--interactive` を付けると操作候補のみに絞ります。
+
+JavaScript の `alert` / `confirm` / `prompt` / `beforeunload` ダイアログが開いている間は通常操作を止め、`human-browser dialog accept` または `human-browser dialog dismiss` で明示的に処理します。`status` / `diagnose` にも現在の dialog 状態を出します。
 
 `record` は内部で定期的に `screenshot` を取得し、`ffmpeg` で `.webm` を生成します。`ffmpeg` がインストールされていない環境では利用できません。
 

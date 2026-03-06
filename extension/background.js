@@ -34,6 +34,7 @@ const state = {
   target: {
     tabId: null,
     attached: false,
+    dialog: null,
   },
   monitor: {
     network: {
@@ -1326,6 +1327,7 @@ async function runCommand(command, payload) {
     case 'select_tab': {
       const tabId = await resolveTabId(payload.target);
       state.target.tabId = tabId;
+      clearDialogState();
       return {
         tab_id: tabId,
       };
@@ -1390,6 +1392,54 @@ async function runCommand(command, payload) {
         throw response?.error || new Error('fill failed');
       }
       return response;
+    }
+
+    case 'dialog': {
+      const tabId = await resolveTabId(payload.tab_id);
+      await ensureAttached(tabId);
+      const response = String(payload.response ?? '');
+      if (response !== 'accept' && response !== 'dismiss') {
+        throw {
+          code: 'BAD_REQUEST',
+          message: 'dialog requires response=accept|dismiss',
+        };
+      }
+
+      const promptText = typeof payload.prompt_text === 'string' ? payload.prompt_text : undefined;
+      if (response === 'dismiss' && promptText !== undefined) {
+        throw {
+          code: 'BAD_REQUEST',
+          message: 'dialog dismiss does not accept prompt_text',
+        };
+      }
+
+      try {
+        await chrome.debugger.sendCommand(
+          { tabId },
+          'Page.handleJavaScriptDialog',
+          {
+            accept: response === 'accept',
+            promptText,
+          },
+        );
+      } catch (error) {
+        throw {
+          code:
+            String(error instanceof Error ? error.message : error).includes('No dialog is showing')
+              ? 'NO_OPEN_DIALOG'
+              : 'HANDLE_DIALOG_FAILED',
+          message: error instanceof Error ? error.message : String(error),
+          details: { tab_id: tabId },
+        };
+      }
+
+      clearDialogState();
+      return {
+        ok: true,
+        handled: true,
+        response,
+        prompt_text: promptText,
+      };
     }
 
     case 'keypress': {
@@ -1863,10 +1913,12 @@ async function ensureAttached(tabId) {
   if (state.target.attached && state.target.tabId === tabId) {
     try {
       await chrome.debugger.sendCommand({ tabId }, 'Runtime.enable');
+      await chrome.debugger.sendCommand({ tabId }, 'Page.enable');
       return;
     } catch {
       state.target.attached = false;
       state.target.tabId = null;
+      clearDialogState();
     }
   }
 
@@ -1876,11 +1928,13 @@ async function ensureAttached(tabId) {
     } catch {
       // Ignore stale detach errors.
     }
+    clearDialogState();
   }
 
   try {
     await chrome.debugger.attach({ tabId }, '1.3');
     await chrome.debugger.sendCommand({ tabId }, 'Runtime.enable');
+    await chrome.debugger.sendCommand({ tabId }, 'Page.enable');
   } catch (error) {
     throw {
       code: 'DEBUGGER_ATTACH_FAILED',
@@ -1891,9 +1945,11 @@ async function ensureAttached(tabId) {
 
   state.target.attached = true;
   state.target.tabId = tabId;
+  clearDialogState();
 }
 
 async function evaluateScript(tabId, scriptBody, input) {
+  assertNoOpenDialog(tabId);
   const expression = `(${scriptBody})(${JSON.stringify(input)})`;
 
   let response;
@@ -1938,6 +1994,7 @@ async function resetSession() {
     : null;
   state.target.attached = false;
   state.target.tabId = null;
+  clearDialogState();
   state.monitor.network.enabled = false;
   state.monitor.console.enabled = false;
 
@@ -1957,6 +2014,40 @@ function handleDebuggerEvent(source, method, params) {
 
   const tabId = source.tabId;
   if (state.target.tabId !== tabId) {
+    return;
+  }
+
+  if (method === 'Page.javascriptDialogOpening') {
+    const openedAt = new Date().toISOString();
+    state.target.dialog = {
+      open: true,
+      type: typeof params?.type === 'string' ? params.type : 'alert',
+      message: typeof params?.message === 'string' ? params.message : '',
+      default_prompt: typeof params?.defaultPrompt === 'string' ? params.defaultPrompt : undefined,
+      url: typeof params?.url === 'string' ? params.url : undefined,
+      opened_at: openedAt,
+    };
+    sendExtensionEvent('dialog_opened', {
+      tab_id: tabId,
+      type: state.target.dialog.type,
+      message: state.target.dialog.message,
+      default_prompt: state.target.dialog.default_prompt,
+      url: state.target.dialog.url,
+      opened_at: state.target.dialog.opened_at,
+    });
+    return;
+  }
+
+  if (method === 'Page.javascriptDialogClosed') {
+    const lastDialog = state.target.dialog;
+    clearDialogState();
+    sendExtensionEvent('dialog_closed', {
+      tab_id: tabId,
+      type: lastDialog?.type,
+      message: lastDialog?.message,
+      result: Boolean(params?.result),
+      user_input: typeof params?.userInput === 'string' ? params.userInput : undefined,
+    });
     return;
   }
 
@@ -2050,6 +2141,7 @@ function pushMonitorEvent(bucket, item) {
 }
 
 async function evaluateRaw(tabId, expression) {
+  assertNoOpenDialog(tabId);
   let response;
   try {
     response = await chrome.debugger.sendCommand(
@@ -2087,6 +2179,7 @@ async function evaluateRaw(tabId, expression) {
 }
 
 async function setFileInputFiles(tabId, selector, files, nth) {
+  assertNoOpenDialog(tabId);
   let doc;
   try {
     await chrome.debugger.sendCommand({ tabId }, 'DOM.enable');
@@ -2195,6 +2288,32 @@ function toStructuredError(error) {
   };
 }
 
+function clearDialogState() {
+  state.target.dialog = null;
+}
+
+function assertNoOpenDialog(tabId) {
+  if (!state.target.dialog?.open) {
+    return;
+  }
+
+  if (!state.target.attached || state.target.tabId !== tabId) {
+    return;
+  }
+
+  throw {
+    code: 'DIALOG_OPEN',
+    message: 'JavaScript dialog is open. Handle it with human-browser dialog before continuing.',
+    details: {
+      tab_id: tabId,
+      type: state.target.dialog.type,
+      message: state.target.dialog.message,
+      default_prompt: state.target.dialog.default_prompt,
+      url: state.target.dialog.url,
+    },
+  };
+}
+
 function setError(message) {
   state.lastError = {
     code: 'CONNECTION_ERROR',
@@ -2221,6 +2340,7 @@ function getUiStatus() {
     target: {
       tab_id: state.target.tabId,
       attached: state.target.attached,
+      dialog: state.target.dialog,
     },
     last_error: state.lastError,
   };

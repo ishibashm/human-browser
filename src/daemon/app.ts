@@ -16,6 +16,7 @@ import type {
   DaemonConfig,
   DaemonEvent,
   DiagnosticsReport,
+  DialogState,
   ExtensionToDaemonEnvelope,
   QueueMode,
   SnapshotData,
@@ -47,6 +48,7 @@ interface RuntimeState {
   reconnectAttempts: number;
   selectedTabId?: number;
   latestSnapshot?: SnapshotData;
+  dialog?: DialogState;
   snapshotById: Map<string, SnapshotData>;
   snapshotOrder: string[];
   pendingCommands: Map<string, PendingCommand>;
@@ -87,6 +89,7 @@ export async function startDaemon(config: DaemonConfig): Promise<StartedDaemon> 
   const state: RuntimeState = {
     config,
     reconnectAttempts: 0,
+    dialog: undefined,
     snapshotById: new Map(),
     snapshotOrder: [],
     pendingCommands: new Map(),
@@ -273,6 +276,7 @@ function onExtensionConnected(state: RuntimeState, ws: WebSocket): void {
   state.extensionSocket = ws;
   state.extensionConnectedAt = new Date().toISOString();
   state.reconnectAttempts = 0;
+  state.dialog = undefined;
   state.reconnectHistory.push({
     at: state.extensionConnectedAt,
     reason: 'extension_connected',
@@ -293,6 +297,7 @@ function onExtensionConnected(state: RuntimeState, ws: WebSocket): void {
 
     const reason = reasonBuffer.toString() || `close_code_${code}`;
     state.extensionSocket = undefined;
+    state.dialog = undefined;
     state.lastDisconnectReason = reason;
     state.reconnectAttempts += 1;
     state.disconnectHistory.push({
@@ -348,6 +353,11 @@ async function handleExtensionMessage(state: RuntimeState, raw: string): Promise
       break;
     }
     case 'EVENT': {
+      if (envelope.name === 'dialog_opened') {
+        state.dialog = toDialogState(envelope.payload);
+      } else if (envelope.name === 'dialog_closed') {
+        state.dialog = undefined;
+      }
       logEvent(state, 'info', `extension.${envelope.name}`, `Extension event: ${envelope.name}`, envelope.payload);
       break;
     }
@@ -366,13 +376,38 @@ async function handleExtensionMessage(state: RuntimeState, raw: string): Promise
       if (envelope.ok) {
         pending.resolve(envelope.result ?? {});
       } else {
+        const extensionCode = envelope.error?.code;
+        const extensionMessage = envelope.error?.message ?? 'Extension command failed';
+        const extensionDetails = {
+          extension_code: extensionCode,
+          ...(envelope.error?.details ?? {}),
+        };
+
+        if (extensionCode === 'DIALOG_OPEN') {
+          pending.reject({
+            code: 'BAD_REQUEST',
+            message: extensionMessage,
+            details: extensionDetails,
+            recovery: {
+              next_command: 'human-browser dialog accept',
+            },
+          });
+          break;
+        }
+
+        if (extensionCode === 'NO_OPEN_DIALOG') {
+          pending.reject({
+            code: 'BAD_REQUEST',
+            message: extensionMessage,
+            details: extensionDetails,
+          });
+          break;
+        }
+
         pending.reject({
           code: 'EXTENSION_ERROR',
-          message: envelope.error?.message ?? 'Extension command failed',
-          details: {
-            extension_code: envelope.error?.code,
-            ...(envelope.error?.details ?? {}),
-          },
+          message: extensionMessage,
+          details: extensionDetails,
         });
       }
       break;
@@ -428,6 +463,7 @@ async function executeCommand(
         session: {
           selected_tab_id: state.selectedTabId,
           latest_snapshot_id: state.latestSnapshot?.snapshot_id,
+          dialog: state.dialog,
           recording: state.recording
             ? {
                 active: state.recording.active,
@@ -767,6 +803,37 @@ async function executeCommand(
         tab_id: tabId,
         selector: target.selector,
         nth: explicitNth,
+        result,
+      };
+    }
+
+    case 'dialog': {
+      const response = getStringField(args, 'response');
+      if (response !== 'accept' && response !== 'dismiss') {
+        throw new HBError('BAD_REQUEST', 'dialog requires args.response to be accept or dismiss');
+      }
+
+      const tabId = resolveTabForAction(state, args);
+      const promptText = typeof args.prompt_text === 'string' ? args.prompt_text : undefined;
+      const result = await sendBridgeCommand(
+        state,
+        'dialog',
+        {
+          tab_id: tabId,
+          response,
+          prompt_text: promptText,
+        },
+        options,
+      );
+
+      if (result.handled === true) {
+        state.dialog = undefined;
+      }
+
+      return {
+        tab_id: tabId,
+        response,
+        prompt_text: promptText,
         result,
       };
     }
@@ -1236,6 +1303,7 @@ async function executeCommand(
 
     case 'reset': {
       state.latestSnapshot = undefined;
+      state.dialog = undefined;
       state.snapshotById.clear();
       state.snapshotOrder = [];
       const extensionOnline = Boolean(
@@ -2087,6 +2155,7 @@ function buildDiagnostics(state: RuntimeState, limit: number): DiagnosticsReport
     session: {
       selected_tab_id: state.selectedTabId,
       latest_snapshot_id: state.latestSnapshot?.snapshot_id,
+      dialog: state.dialog,
     },
     events: state.events.slice(-normalized),
     disconnect_history: state.disconnectHistory.slice(-normalized),
@@ -2126,6 +2195,21 @@ function logEvent(
   });
 
   truncateHistory(state);
+}
+
+function toDialogState(payload: Record<string, unknown> | undefined): DialogState | undefined {
+  if (!payload || typeof payload !== 'object') {
+    return undefined;
+  }
+
+  return {
+    open: true,
+    type: typeof payload.type === 'string' ? payload.type : undefined,
+    message: typeof payload.message === 'string' ? payload.message : undefined,
+    default_prompt: typeof payload.default_prompt === 'string' ? payload.default_prompt : undefined,
+    url: typeof payload.url === 'string' ? payload.url : undefined,
+    opened_at: typeof payload.opened_at === 'string' ? payload.opened_at : undefined,
+  };
 }
 
 function sendJson(res: ServerResponse, status: number, payload: DaemonApiResponse | Record<string, unknown>): void {

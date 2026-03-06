@@ -437,6 +437,51 @@ export function toDaemonRequest(
         },
       };
     }
+    case 'dialog': {
+      const response = args[0];
+      if (response !== 'accept' && response !== 'dismiss') {
+        throw new HBError('BAD_REQUEST', 'dialog requires <accept|dismiss> [text] [--tab <active|tab_id>]');
+      }
+
+      let tabId: number | 'active' | undefined;
+      const positional: string[] = [];
+
+      for (let i = 1; i < args.length; i += 1) {
+        const token = args[i];
+        if (token === '--tab') {
+          const value = args[i + 1];
+          if (value === undefined || value.startsWith('--')) {
+            throw new HBError('BAD_REQUEST', 'Flag requires a value: --tab');
+          }
+          tabId = parseTab(value);
+          i += 1;
+          continue;
+        }
+
+        if (token.startsWith('--')) {
+          throw new HBError('BAD_REQUEST', `Unknown flag: ${token}`);
+        }
+
+        positional.push(token);
+      }
+
+      if (response === 'dismiss' && positional.length > 0) {
+        throw new HBError('BAD_REQUEST', 'dialog dismiss does not accept prompt text');
+      }
+
+      if (positional.length > 1) {
+        throw new HBError('BAD_REQUEST', 'dialog accepts at most one prompt text argument');
+      }
+
+      return {
+        command,
+        args: {
+          response,
+          prompt_text: positional[0],
+          tab_id: tabId,
+        },
+      };
+    }
     case 'keypress':
     case 'press':
     case 'key': {
@@ -1522,6 +1567,7 @@ function printHelp(): void {
       '  snapshot [--tab <active|tab_id>] [-i|--interactive] [-C|--cursor] [-c|--compact] [-d|--depth <N>] [-s|--selector <css>]',
       '  click <selector|@ref> [--snapshot <snapshot_id>] [--nth <index|-1>]',
       '  fill <selector|@ref> <value> [--snapshot <snapshot_id>] [--nth <index|-1>]',
+      '  dialog <accept|dismiss> [text] [--tab <active|tab_id>]',
       '    (for <input type="file">, <value> is treated as a local file path)',
       '  keypress|press|key <key> [--tab <active|tab_id>]',
       '  scroll <x> <y> [--tab <active|tab_id>]',

@@ -153,6 +153,25 @@ test('fill supports --nth and ref payloads', () => {
   });
 });
 
+test('dialog accept maps prompt text and tab to daemon args', () => {
+  const request = toDaemonRequest('dialog', ['accept', 'confirmed', '--tab', 'active']);
+  assert.equal(request.command, 'dialog');
+  assert.deepEqual(request.args, {
+    response: 'accept',
+    prompt_text: 'confirmed',
+    tab_id: 'active',
+  });
+});
+
+test('dialog dismiss rejects prompt text', () => {
+  assert.throws(
+    () => {
+      toDaemonRequest('dialog', ['dismiss', 'nope']);
+    },
+    (error: unknown) => error instanceof HBError && error.structured.code === 'BAD_REQUEST',
+  );
+});
+
 test('--nth must be integer >= -1', () => {
   assert.throws(
     () => {

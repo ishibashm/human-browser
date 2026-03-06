@@ -41,6 +41,9 @@
   - ref (`@eN`/`ref=eN`/`eN`) を使う場合は `--snapshot` 必須
   - `--nth` で同一selectorの一致候補を選択（`0`始まり、`-1` は末尾）
   - `input[type=file]` を対象にする場合は `<value>` にローカルファイルパスを渡す
+- `human-browser dialog <accept|dismiss> [text] [--tab <active|tab_id>]`
+  - JavaScript dialog (`alert` / `confirm` / `prompt` / `beforeunload`) を明示的に処理
+  - dialog が開いている間は通常の `snapshot` / `click` / `fill` などは `BAD_REQUEST` で止め、`human-browser dialog accept` を案内する
 - `human-browser keypress <key> [--tab <active|tab_id>]`
 - `human-browser scroll <x> <y> [--tab <active|tab_id>]`
 - `human-browser navigate <url> [--tab <active|tab_id>]`

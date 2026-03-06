@@ -48,7 +48,12 @@ async function callDaemonRaw(config: DaemonConfig, command: string, args: Record
   const payload = (await response.json()) as {
     ok: boolean;
     data?: Record<string, unknown>;
-    error?: { code: string; message: string };
+    error?: {
+      code: string;
+      message: string;
+      details?: Record<string, unknown>;
+      recovery?: { next_command?: string };
+    };
   };
 
   return payload;
@@ -126,6 +131,15 @@ test('snapshot -> click -> fill roundtrip works via daemon/bridge protocol', asy
   let lastSnapshotPayload: Record<string, unknown> | undefined;
   let snapshotCount = 0;
   let baselineDir: string | undefined;
+  let currentDialog:
+    | {
+        type: string;
+        message: string;
+        default_prompt?: string;
+        url?: string;
+        opened_at?: string;
+      }
+    | undefined;
 
   const ws = new WebSocket(`ws://${config.daemon.host}:${config.daemon.port}/bridge?token=${config.auth.token}`);
 
@@ -190,6 +204,19 @@ test('snapshot -> click -> fill roundtrip works via daemon/bridge protocol', asy
     }
 
     if (message.command === 'snapshot') {
+      if (currentDialog) {
+        reply(false, {
+          code: 'DIALOG_OPEN',
+          message: 'JavaScript dialog is open. Handle it with human-browser dialog before continuing.',
+          details: {
+            tab_id: 1,
+            type: currentDialog.type,
+            message: currentDialog.message,
+            url: currentDialog.url,
+          },
+        });
+        return;
+      }
       snapshotCount += 1;
       lastSnapshotPayload = message.payload;
       const nodes = [
@@ -242,6 +269,31 @@ test('snapshot -> click -> fill roundtrip works via daemon/bridge protocol', asy
       }
       input.value = value;
       reply(true, { ok: true });
+      return;
+    }
+
+    if (message.command === 'dialog') {
+      if (!currentDialog) {
+        reply(false, { code: 'NO_OPEN_DIALOG', message: 'No open JavaScript dialog for the selected tab' });
+        return;
+      }
+
+      const response = String(message.payload?.response ?? '');
+      ws.send(
+        JSON.stringify({
+          type: 'EVENT',
+          name: 'dialog_closed',
+          payload: {
+            tab_id: 1,
+            type: currentDialog.type,
+            message: currentDialog.message,
+            result: response === 'accept',
+            user_input: typeof message.payload?.prompt_text === 'string' ? message.payload.prompt_text : undefined,
+          },
+        }),
+      );
+      currentDialog = undefined;
+      reply(true, { ok: true, handled: true, response });
       return;
     }
 
@@ -373,6 +425,48 @@ test('snapshot -> click -> fill roundtrip works via daemon/bridge protocol', asy
     assert.equal(duplicateButton2.getAttribute('data-clicked'), '1');
     assert.equal(duplicateInput1.value, '');
     assert.equal(duplicateInput2.value, 'nth@example.com');
+
+    currentDialog = {
+      type: 'alert',
+      message: '確認ダイアログ',
+      url: dom.window.location.href,
+      opened_at: new Date().toISOString(),
+    };
+    ws.send(
+      JSON.stringify({
+        type: 'EVENT',
+        name: 'dialog_opened',
+        payload: {
+          tab_id: 1,
+          ...currentDialog,
+        },
+      }),
+    );
+    await new Promise((resolve) => setTimeout(resolve, 0));
+
+    const blockedSnapshot = await callDaemonRaw(config, 'snapshot', {});
+    assert.equal(blockedSnapshot.ok, false);
+    assert.equal(blockedSnapshot.error?.code, 'BAD_REQUEST');
+    assert.match(blockedSnapshot.error?.message ?? '', /JavaScript dialog is open/);
+    assert.equal(blockedSnapshot.error?.recovery?.next_command, 'human-browser dialog accept');
+
+    const statusWithDialog = await callDaemon(config, 'status', {});
+    assert.deepEqual(statusWithDialog.session?.dialog, {
+      open: true,
+      type: 'alert',
+      message: '確認ダイアログ',
+      url: dom.window.location.href,
+      opened_at: currentDialog.opened_at,
+    });
+
+    const handledDialog = await callDaemon(config, 'dialog', {
+      response: 'accept',
+    });
+    assert.equal(handledDialog.result?.handled, true);
+
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    const statusAfterDialog = await callDaemon(config, 'status', {});
+    assert.equal(statusAfterDialog.session?.dialog, undefined);
   } finally {
     ws.close();
     await daemon.close();

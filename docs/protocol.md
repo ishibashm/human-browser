@@ -47,6 +47,35 @@ Transport: WebSocket (`ws://127.0.0.1:<port>/bridge?token=<shared_token>`)
 }
 ```
 
+Dialog lifecycle events:
+
+```json
+{
+  "type": "EVENT",
+  "name": "dialog_opened",
+  "payload": {
+    "tab_id": 123,
+    "type": "alert",
+    "message": "確認してください",
+    "url": "https://example.com/form",
+    "opened_at": "2026-03-06T10:00:00.000Z"
+  }
+}
+```
+
+```json
+{
+  "type": "EVENT",
+  "name": "dialog_closed",
+  "payload": {
+    "tab_id": 123,
+    "type": "alert",
+    "message": "確認してください",
+    "result": true
+  }
+}
+```
+
 ### `RESULT`
 
 Success:
@@ -81,6 +110,7 @@ Failure:
 - `snapshot`: `{ target: "active" | number, interactive?: boolean, cursor?: boolean, compact?: boolean, depth?: number, selector?: string }`
 - `click`: `{ tab_id: number | "active", selector: string, nth?: number }`
 - `fill`: `{ tab_id: number | "active", selector: string, value: string, nth?: number }`
+- `dialog`: `{ tab_id: number | "active", response: "accept" | "dismiss", prompt_text?: string }`
 - `keypress`: `{ tab_id: number | "active", key: string }`
 - `scroll`: `{ tab_id: number | "active", x: number, y: number }`
 - `navigate`: `{ tab_id: number | "active", url: string }`
