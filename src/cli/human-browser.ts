@@ -533,6 +533,20 @@ export function toDaemonRequest(
         },
       };
     }
+    case 'new-tab': {
+      const url = args[0];
+      if (!url) {
+        throw new HBError('BAD_REQUEST', 'new-tab requires <url>');
+      }
+      const parsed = parseNamedFlags(args.slice(1), ['--tab']);
+      return {
+        command: 'new_tab',
+        args: {
+          url,
+          anchor_tab_id: parsed['--tab'] === undefined ? undefined : parseTab(parsed['--tab']),
+        },
+      };
+    }
     case 'open':
     case 'goto': {
       const url = args[0];
@@ -1533,6 +1547,12 @@ function renderText(command: string, data: Record<string, unknown>): void {
       process.stdout.write(`${String(data.tree)}\n`);
       return;
     }
+    case 'new-tab': {
+      process.stdout.write(
+        `tab_id=${String(data.tab_id)} window_id=${String(data.window_id)} active=${String(data.active)} url=${String(data.url)}\n`,
+      );
+      return;
+    }
     case 'diff':
     case 'status':
     case 'diagnose': {
@@ -1572,6 +1592,7 @@ function printHelp(): void {
       '  keypress|press|key <key> [--tab <active|tab_id>]',
       '  scroll <x> <y> [--tab <active|tab_id>]',
       '  navigate <url> [--tab <active|tab_id>]',
+      '  new-tab <url> [--tab <active|tab_id>]',
       '  open <url> [--tab <active|tab_id>]',
       '  close [--tab <active|tab_id>]',
       '  hover <selector|@ref> [--snapshot <snapshot_id>]',

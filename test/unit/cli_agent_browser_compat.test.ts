@@ -12,6 +12,15 @@ test('open maps to daemon open command', () => {
   });
 });
 
+test('new-tab maps to daemon new_tab command', () => {
+  const request = toDaemonRequest('new-tab', ['https://example.com', '--tab', 'active']);
+  assert.equal(request.command, 'new_tab');
+  assert.deepEqual(request.args, {
+    url: 'https://example.com',
+    anchor_tab_id: 'active',
+  });
+});
+
 test('screenshot supports optional path and --full', () => {
   const request = toDaemonRequest('screenshot', ['output.png', '--full', '--tab', 'active']);
   assert.equal(request.command, 'screenshot');

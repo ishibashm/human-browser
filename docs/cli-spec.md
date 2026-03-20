@@ -47,6 +47,8 @@
 - `human-browser keypress <key> [--tab <active|tab_id>]`
 - `human-browser scroll <x> <y> [--tab <active|tab_id>]`
 - `human-browser navigate <url> [--tab <active|tab_id>]`
+- `human-browser new-tab <url> [--tab <active|tab_id>]`
+  - 基準tabと同じ window に background tab を作成し、その tab を以後の操作対象として選択する
 - `human-browser open <url> [--tab <active|tab_id>]`
 - `human-browser close [--tab <active|tab_id>]`
 - `human-browser hover <selector|@ref> [--snapshot <snapshot_id>]`

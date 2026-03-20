@@ -114,6 +114,7 @@ Failure:
 - `keypress`: `{ tab_id: number | "active", key: string }`
 - `scroll`: `{ tab_id: number | "active", x: number, y: number }`
 - `navigate`: `{ tab_id: number | "active", url: string }`
+- `new_tab`: `{ url: string, anchor_tab_id: number | "active" }`
 - `open`: `{ tab_id: number | "active", url: string }`
 - `close`: `{ tab_id: number | "active" }`
 - `hover`: `{ tab_id: number | "active", selector: string, nth?: number }`

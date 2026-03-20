@@ -51,6 +51,7 @@ human-browser click '.scene-card button' --nth 1
 human-browser fill 'textarea[placeholder="Prompt"]' "scene 2" --nth 1
 human-browser dialog accept
 human-browser dialog dismiss
+human-browser new-tab https://example.com
 human-browser open https://example.com
 human-browser hover '#menu'
 human-browser screenshot

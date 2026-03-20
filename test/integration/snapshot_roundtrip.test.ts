@@ -67,6 +67,142 @@ async function callDaemon(config: DaemonConfig, command: string, args: Record<st
   return payload.data ?? {};
 }
 
+test('daemon.close resolves even when bridge websocket is connected', async () => {
+  const port = await getFreePort();
+  const config: DaemonConfig = {
+    daemon: {
+      host: '127.0.0.1',
+      port,
+    },
+    auth: {
+      token: 'testtoken_testtoken_testtoken',
+    },
+    diagnostics: {
+      max_events: 100,
+    },
+  };
+
+  const daemon = await startDaemon(config);
+  const ws = new WebSocket(`ws://${config.daemon.host}:${config.daemon.port}/bridge?token=${config.auth.token}`);
+
+  await new Promise<void>((resolve, reject) => {
+    ws.once('open', () => resolve());
+    ws.once('error', reject);
+  });
+
+  ws.send(JSON.stringify({ type: 'HELLO', version: 'test', retry_count: 0 }));
+
+  try {
+    await Promise.race([
+      daemon.close(),
+      new Promise<never>((_, reject) => {
+        setTimeout(() => {
+          reject(new Error('daemon.close timed out while bridge websocket was still connected'));
+        }, 1000);
+      }),
+    ]);
+  } finally {
+    if (ws.readyState === ws.OPEN || ws.readyState === ws.CONNECTING) {
+      ws.terminate();
+    }
+  }
+});
+
+test('new_tab selects the created tab for subsequent commands', async () => {
+  const port = await getFreePort();
+  const config: DaemonConfig = {
+    daemon: {
+      host: '127.0.0.1',
+      port,
+    },
+    auth: {
+      token: 'testtoken_testtoken_testtoken',
+    },
+    diagnostics: {
+      max_events: 100,
+    },
+  };
+
+  const daemon = await startDaemon(config);
+  const ws = new WebSocket(`ws://${config.daemon.host}:${config.daemon.port}/bridge?token=${config.auth.token}`);
+  let lastSnapshotTarget: unknown;
+
+  await new Promise<void>((resolve, reject) => {
+    ws.once('open', () => resolve());
+    ws.once('error', reject);
+  });
+
+  ws.send(JSON.stringify({ type: 'HELLO', version: 'test', retry_count: 0 }));
+
+  ws.on('message', (raw) => {
+    const message = JSON.parse(raw.toString()) as {
+      type: string;
+      request_id?: string;
+      command?: string;
+      payload?: Record<string, unknown>;
+      ts?: string;
+    };
+
+    if (message.type === 'PING') {
+      ws.send(JSON.stringify({ type: 'PONG', ts: message.ts }));
+      return;
+    }
+
+    if (message.type !== 'COMMAND' || !message.request_id || !message.command) {
+      return;
+    }
+
+    if (message.command === 'new_tab') {
+      ws.send(
+        JSON.stringify({
+          type: 'RESULT',
+          request_id: message.request_id,
+          ok: true,
+          result: {
+            tab_id: 2,
+            window_id: 10,
+            url: 'https://example.com/',
+            active: false,
+          },
+        }),
+      );
+      return;
+    }
+
+    if (message.command === 'snapshot') {
+      lastSnapshotTarget = message.payload?.target;
+      ws.send(
+        JSON.stringify({
+          type: 'RESULT',
+          request_id: message.request_id,
+          ok: true,
+          result: {
+            tab_id: 2,
+            nodes: [],
+          },
+        }),
+      );
+    }
+  });
+
+  try {
+    const created = await callDaemon(config, 'new_tab', {
+      url: 'https://example.com',
+    });
+    assert.equal(created.tab_id, 2);
+    assert.equal(created.window_id, 10);
+
+    const snapshot = await callDaemon(config, 'snapshot', {});
+    assert.equal(snapshot.tab_id, 2);
+    assert.equal(lastSnapshotTarget, 2);
+  } finally {
+    if (ws.readyState === ws.OPEN || ws.readyState === ws.CONNECTING) {
+      ws.terminate();
+    }
+    await daemon.close();
+  }
+});
+
 test('snapshot -> click -> fill roundtrip works via daemon/bridge protocol', async () => {
   const port = await getFreePort();
   const config: DaemonConfig = {
@@ -193,7 +329,7 @@ test('snapshot -> click -> fill roundtrip works via daemon/bridge protocol', asy
 
     if (message.command === 'list_tabs') {
       reply(true, {
-        tabs: [{ id: 1, active: true, title: 'fixture', url: dom.window.location.href }],
+        tabs: [{ id: 1, window_id: 10, active: true, title: 'fixture', url: dom.window.location.href }],
       });
       return;
     }

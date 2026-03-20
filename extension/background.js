@@ -1317,6 +1317,7 @@ async function runCommand(command, payload) {
           .filter((tab) => typeof tab.id === 'number')
           .map((tab) => ({
             id: tab.id,
+            window_id: typeof tab.windowId === 'number' ? tab.windowId : null,
             active: Boolean(tab.active),
             title: tab.title || '',
             url: tab.url || '',
@@ -1468,6 +1469,43 @@ async function runCommand(command, payload) {
         url: String(payload.url),
       });
       return response;
+    }
+
+    case 'new_tab': {
+      const url = String(payload.url);
+      const anchorTabId = await resolveTabId(payload.anchor_tab_id);
+      const anchorTab = await chrome.tabs.get(anchorTabId).catch(() => null);
+      if (!anchorTab || typeof anchorTab.id !== 'number' || typeof anchorTab.windowId !== 'number') {
+        throw {
+          code: 'NO_SUCH_TAB',
+          message: `No tab with given id ${anchorTabId}.`,
+          details: { tab_id: anchorTabId },
+        };
+      }
+      const created = await chrome.tabs.create({
+        url,
+        windowId: anchorTab.windowId,
+        index: typeof anchorTab.index === 'number' ? anchorTab.index + 1 : undefined,
+        active: false,
+      });
+      if (!created || typeof created.id !== 'number' || typeof created.windowId !== 'number') {
+        throw {
+          code: 'CREATE_TAB_FAILED',
+          message: 'Created tab does not contain an addressable tab',
+          details: {
+            url,
+            anchor_tab_id: anchorTabId,
+            window_id: anchorTab.windowId,
+          },
+        };
+      }
+      return {
+        ok: true,
+        window_id: created.windowId,
+        tab_id: created.id,
+        url: created.url || url,
+        active: Boolean(created.active),
+      };
     }
 
     case 'open': {

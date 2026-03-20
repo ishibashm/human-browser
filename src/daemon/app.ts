@@ -2,6 +2,7 @@ import { randomUUID } from 'node:crypto';
 import { createServer, type IncomingMessage, type Server, type ServerResponse } from 'node:http';
 import { access, mkdir, readFile, writeFile } from 'node:fs/promises';
 import { constants as fsConstants } from 'node:fs';
+import type { Socket } from 'node:net';
 import { dirname, extname, join, resolve } from 'node:path';
 import { homedir } from 'node:os';
 import { spawn } from 'node:child_process';
@@ -103,8 +104,16 @@ export async function startDaemon(config: DaemonConfig): Promise<StartedDaemon> 
   const httpServer = createServer((req, res) => {
     void handleHttpRequest(state, req, res);
   });
+  const serverSockets = new Set<Socket>();
 
   const bridgeServer = new WebSocketServer({ noServer: true });
+
+  httpServer.on('connection', (socket) => {
+    serverSockets.add(socket);
+    socket.on('close', () => {
+      serverSockets.delete(socket);
+    });
+  });
 
   httpServer.on('upgrade', (request, socket, head) => {
     void handleUpgrade(state, bridgeServer, request, socket, head);
@@ -156,8 +165,16 @@ export async function startDaemon(config: DaemonConfig): Promise<StartedDaemon> 
         code: 'DISCONNECTED',
         message: 'Daemon shutting down',
       });
+      if (state.extensionSocket) {
+        state.extensionSocket.terminate();
+        state.extensionSocket = undefined;
+      }
+      for (const client of bridgeServer.clients) {
+        client.terminate();
+      }
+      await closeBridgeServer(bridgeServer);
+      destroyTrackedSockets(serverSockets);
       await closeServer(httpServer);
-      bridgeServer.close();
     },
     port: config.daemon.port,
     host: config.daemon.host,
@@ -175,6 +192,24 @@ function closeServer(server: Server): Promise<void> {
       resolve();
     });
   });
+}
+
+function closeBridgeServer(server: WebSocketServer): Promise<void> {
+  return new Promise((resolve, reject) => {
+    server.close((error) => {
+      if (error) {
+        reject(error);
+        return;
+      }
+      resolve();
+    });
+  });
+}
+
+function destroyTrackedSockets(sockets: Set<Socket>): void {
+  for (const socket of sockets) {
+    socket.destroy();
+  }
 }
 
 function authorizeHttp(state: RuntimeState, req: IncomingMessage): void {
@@ -872,6 +907,30 @@ async function executeCommand(
       return {
         tab_id: tabId,
         url,
+        result,
+      };
+    }
+
+    case 'new_tab': {
+      const url = getStringField(args, 'url');
+      const anchorTabId =
+        args.anchor_tab_id === undefined
+          ? resolveTabForAction(state, args)
+          : resolveTabForAction(state, { tab_id: args.anchor_tab_id });
+      const result = await sendBridgeCommand(state, 'new_tab', { url, anchor_tab_id: anchorTabId }, options);
+      const tabId = Number(result.tab_id);
+      const windowId = Number(result.window_id);
+      if (!Number.isFinite(tabId) || !Number.isFinite(windowId)) {
+        throw new HBError('EXTENSION_ERROR', 'new_tab result is missing tab_id or window_id', {
+          result,
+        });
+      }
+      state.selectedTabId = tabId;
+      return {
+        window_id: windowId,
+        tab_id: tabId,
+        url: String(result.url ?? url),
+        active: Boolean(result.active),
         result,
       };
     }
